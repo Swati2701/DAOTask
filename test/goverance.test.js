@@ -1,99 +1,137 @@
 const { BigNumber } = require('@ethersproject/bignumber')
 const chai = require('chai')
-const { expect } = chai
-const { ethers } = require('hardhat')
+const { expect, bignumber, assert } = chai
+const { ethers, network } = require('hardhat')
 const { solidity } = require('ethereum-waffle')
 chai.use(solidity)
+const web3utils = require('web3-utils')
 
 let Goverance,
-	Box,
-	box,
-	timeLock,
-	myToken,
-	owner,
+	addrs,
 	goverance,
+	MyToken,
+	TimeLock,
+	myToken,
+	timeLock,
+	owner,
 	addr1,
-	addr2,
-	accounts
-
-const amount = BigNumber.from(1).mul(BigNumber.from(10).pow(16))
-
-describe('Goverance', () => {
+	addr2
+describe('DAO Testcases', () => {
 	beforeEach(async () => {
-		accounts = await ethers.getSigners()
-		;[owner, addr1, addr2] = accounts
+		;[owner, addr1, addr2, addrs] = await ethers.getSigners()
 
-		//Deployed MY Token contract
-		const MYToken = await ethers.getContractFactory('MyToken')
-		myToken = await MYToken.deploy()
+		MyToken = await ethers.getContractFactory('MyToken')
+		myToken = await MyToken.deploy()
 		await myToken.deployed()
 
-		const TimeLock = await ethers.getContractFactory('TimeLock')
-		timeLock = await TimeLock.deploy(1, [], [])
+		TimeLock = await ethers.getContractFactory('TimeLock')
+		timeLock = await TimeLock.deploy('86400', [], [])
 		await timeLock.deployed()
 
 		Goverance = await ethers.getContractFactory('Goverance')
 		goverance = await Goverance.deploy(myToken.address, timeLock.address)
 		await goverance.deployed()
-
-		Box = await ethers.getContractFactory('Box')
-		box = await Box.deploy()
-		await box.deployed()
 	})
 
-	describe('DAO contract', () => {
-		it('Create a proposals', async function () {
-			await myToken.mint(addr1.address, 10 * (10 ^ 18))
-			await myToken.connect(addr1).delegate(addr1.address)
-
-			await myToken.mint(addr2.address, 50 * (10 ^ 18))
-			await myToken.connect(addr2).delegate(addr2.address)
-
-			const proposerRole = await timeLock.PROPOSER_ROLE()
-			await timeLock.grantRole(proposerRole, goverance.address)
-
-			// console.log(goverance)
-			const proposalId = await goverance.propose(
-				[box.address],
-				[0],
-				[await box.interface.encodeFunctionData('store', [150])],
-				'Set value'
-			)
-			console.log(proposalId)
-
-			// console.log(await goverance.votingDelay())
-			// console.log(await goverance.votingPeriod())
-
-			const descriptionHash = ethers.utils.id('Set value')
+	describe('DAO Contract', () => {
+		it('Checking votingDelay & votingPeriod', async function () {
+			expect(await goverance.votingDelay()).to.equal(1)
+			expect(await goverance.votingPeriod()).to.equal(7)
 		})
 
-		it.skip('Create a proposals & execute it', async function () {
-			await myToken.mint(addr1.address, 10 * (10 ^ 18))
+		it('Create a proposal', async function () {
+			await myToken.transfer(addr1.address, 10000)
 			await myToken.connect(addr1).delegate(addr1.address)
-			// console.log(await myToken.getVotes(addr1.address))
 
 			const proposerRole = await timeLock.PROPOSER_ROLE()
 			await timeLock.grantRole(proposerRole, goverance.address)
 
 			const proposalId = await goverance.propose(
-				[box.address],
+				[myToken.address],
 				[0],
-				[await box.interface.encodeFunctionData('store', [150])],
-				'Set value'
+				[
+					await myToken.interface.encodeFunctionData('transfer', [
+						addr1.address,
+						1000,
+					]),
+				],
+				'Transfer the tokens'
 			)
 
-			console.log(proposalId)
-			const openTimes = 8 * 24 * 60 * 60
-			await network.provider.send('evm_increaseTime', [openTimes])
-			await network.provider.send('evm_mine')
+			const val = await proposalId.wait(1)
+			const proposalVal = val.events[0].args.proposalId
 
-			const descriptionHash = ethers.utils.id('Set value')
+			const descriptionHash = ethers.utils.id('Transfer the tokens')
+
+			expect(
+				await goverance.hashProposal(
+					[myToken.address],
+					[0],
+					[
+						await myToken.interface.encodeFunctionData('transfer', [
+							addr1.address,
+							1000,
+						]),
+					],
+					descriptionHash
+				)
+			).to.be.equal(proposalVal)
+		})
+
+		it('Create a proposal & queue', async function () {
+			await myToken.transfer(
+				addr1.address,
+				BigNumber.from(1000).mul(BigNumber.from(10).pow(18))
+			)
+			await myToken.connect(addr1).delegate(addr1.address)
+
+			const id = await goverance.propose(
+				[myToken.address],
+				[1],
+				[
+					await myToken.interface.encodeFunctionData('transfer', [
+						addr1.address,
+						1000,
+					]),
+				],
+				'Transfer the tokens'
+			)
+
+			const proposeVal = await id.wait(1)
+			const proposalId = proposeVal.events[0].args.proposalId
+
+			expect(await goverance.state(proposalId)).to.be.equal(0)
+
+			await hre.network.provider.send('hardhat_mine', ['0x1'])
+			await goverance.connect(addr1).castVote(proposalId, 1)
+			await hre.network.provider.send('hardhat_mine', ['0x31E5'])
+			const descriptionHash = web3utils.keccak256('Transfer the tokens')
+
+			expect(await goverance.state(proposalId)).to.be.equal(4)
+
+			const proposerRole = await timeLock.PROPOSER_ROLE()
+			const executorRole = await timeLock.EXECUTOR_ROLE()
+			const adminRole = await timeLock.TIMELOCK_ADMIN_ROLE()
+			await timeLock.grantRole(proposerRole, goverance.address)
+			await timeLock.grantRole(
+				executorRole,
+				'0x0000000000000000000000000000000000000000'
+			)
+
 			await goverance.queue(
-				[box.address],
-				[0],
-				[await box.interface.encodeFunctionData('store', [150])],
+				[myToken.address],
+				[1],
+				[
+					await myToken.interface.encodeFunctionData('transfer', [
+						addr1.address,
+						1000,
+					]),
+				],
 				descriptionHash
 			)
+			await hre.network.provider.send('evm_mine', [24 * 1656326946])
+
+			expect(await goverance.state(proposalId)).to.be.equal(5)
 		})
 	})
 })
